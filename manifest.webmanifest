@@ -1,0 +1,13 @@
+{
+  "name": "Stomp Commander",
+  "short_name": "Stomp Commander",
+  "description": "Copy Zoom ZDL effects between a PC folder and a G1on-family or MultiStomp pedal over USB MIDI.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#e4e4e4",
+  "theme_color": "#1b998b",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

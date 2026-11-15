@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stomp Commander</title>
+<meta name="description" content="Copy Zoom ZDL effects between a PC folder and a G1on-family or MultiStomp pedal over USB MIDI.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+<script type="module" src="js/main.js"></script>
+</head>
+<body>
+<main class="panels">
+  <section class="panel" id="pc">
+    <header>
+      <div class="bar">
+        <h2 id="pc-title">PC</h2>
+        <div class="tools">
+          <button id="pc-pick" data-icon="folder">Pick folder…</button>
+          <button id="pc-grant" data-icon="folder-open" hidden>Reopen folder</button>
+          <button id="pc-refresh" data-icon="refresh">Refresh</button>
+          <label class="check" title="Show all files, not only ZDL effects"><input type="checkbox" id="pc-all"> All files</label>
+        </div>
+      </div>
+    </header>
+    <div class="loadbar" id="pc-load"><i></i></div>
+    <div class="spin" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="list" id="pc-list" data-side="pc"><table><thead><tr><th class="pic"></th><th class="name" data-sort="name">File name</th><th class="effect" data-sort="effect">Name</th><th class="meta" data-sort="category">Category</th><th class="size" data-sort="size">Size</th></tr></thead><tbody></tbody></table><p class="empty">Pick a folder with ZDL files.</p></div>
+    <footer class="bar">
+      <button id="pc-copy" class="icon-end" data-icon="right">Copy to pedal</button>
+      <button id="pc-delete" data-icon="trash">Delete</button>
+      <button id="pc-selall" data-icon="select-all" title="Select all files (Ctrl+A); again: select none">Select all</button>
+      <span class="sum" id="pc-sum"></span>
+    </footer>
+  </section>
+
+  <div class="gutter gutter-x" id="split-x" role="separator" aria-orientation="vertical" tabindex="0" title="Drag to resize, double-click to reset"></div>
+
+  <section class="panel" id="pedal">
+    <header>
+      <div class="bar">
+        <h2 id="pedal-title">Pedal</h2>
+        <div class="tools">
+          <select id="midi-port" title="MIDI port"></select>
+          <button id="pedal-connect" data-icon="plug">Connect</button>
+          <button id="pedal-refresh" data-icon="refresh">Refresh</button>
+        </div>
+      </div>
+    </header>
+    <div class="loadbar" id="pedal-load"><i></i></div>
+    <div class="spin" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="list" id="pedal-list" data-side="pedal"><table><thead><tr><th class="pic"></th><th class="name" data-sort="name">File name</th><th class="effect" data-sort="effect">Name</th><th class="meta" data-sort="category">Category</th><th class="size" data-sort="size">Size</th></tr></thead><tbody></tbody></table><p class="empty">Connect the pedal (USB), then drop ZDL files here to upload them.</p></div>
+    <footer class="bar">
+      <button id="pedal-copy" data-icon="left" disabled>Copy to PC</button>
+      <button id="pedal-delete" data-icon="trash">Delete</button>
+      <button id="pedal-selall" data-icon="select-all" title="Select all files (Ctrl+A); again: select none">Select all</button>
+      <span class="busy" id="pedal-busy"></span>
+      <span class="sum" id="pedal-sum"></span>
+    </footer>
+  </section>
+</main>
+
+<div class="gutter gutter-y" id="split-y" role="separator" aria-orientation="horizontal" tabindex="0" title="Drag to resize, double-click to reset"></div>
+
+<section class="bottom">
+  <div class="preview">
+    <canvas id="preview" width="256" height="192" class="pic"></canvas>
+    <div id="preview-info"><p class="dim">Select a ZDL file to see its description.</p></div>
+  </div>
+  <div class="console">
+    <pre id="log" aria-live="polite"></pre>
+    <ul id="suggest" class="suggest" role="listbox" hidden></ul>
+    <textarea id="cli" rows="2" spellcheck="false" placeholder="Command, e.g. help" autocomplete="off"></textarea>
+  </div>
+</section>
+</body>
+</html>

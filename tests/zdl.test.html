@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stomp Commander tests</title>
+<style>body { font: 13px ui-monospace, Consolas, monospace; } canvas { width: 192px; height: 128px; margin: 2px; }</style>
+</head>
+<body>
+<p>Serve this folder: <code>python -m http.server 8000</code>,
+then open <code>http://localhost:8000/tests/zdl.test.html</code> (fixtures: <code>tests/fixtures/README.md</code>).</p>
+<pre id="out"></pre>
+<div id="pics"></div>
+<script type="module">
+import { parseZdl, drawPicture, pixel, PIC_W, PIC_H } from '../js/zdl.js';
+import { ZoomG1, pack7, unpack7, crc32, u35 } from '../js/zoomg1.js';
+
+const out = document.getElementById('out');
+let fails = 0;
+const say = (ok, text) => { if (!ok) fails++; out.textContent += `${ok ? 'ok  ' : 'FAIL'} ${text}\n`; };
+const bytes = async url => new Uint8Array(await (await fetch(url)).arrayBuffer());
+
+// Protocol helpers
+say(crc32(new TextEncoder().encode('123456789')) === 0xCBF43926, 'crc32("123456789") = CBF43926');
+const data = Uint8Array.from({ length: 513 }, (_, i) => (i * 37 + 200) & 0xFF);
+const packed = pack7(data);
+say(packed.every(b => b < 0x80) && packed.length === 513 + Math.ceil(513 / 7), 'pack7: 7-bit bytes, one header per 7');
+say(unpack7(packed).every((b, i) => b === data[i]), 'unpack7(pack7(x)) = x');
+say(JSON.stringify(u35(0xFFFFFFFF)) === '[127,127,127,127,15]' && JSON.stringify(u35(512)) === '[0,4,0,0,0]', 'u35');
+
+// Upload sequence through a fake pedal; the first write message must equal Custom-Zoom-ZDL-Effects' tools/g1on_sysex.py's
+// (sha256 of its body for the same 512 bytes, computed with Pedal._u35 / _pack).
+const sent = [];
+const fake = {
+  xfer: async body => {
+    sent.push(body);
+    const sub = body[4];
+    if (body[3] === 0x60 && sub === 0x05) return [[0x52, 0, 0x64, 0x60, 0x03, 0, 0, 0, 0, 0]];
+    if (body[3] === 0x60 && (sub === 0x20 || sub === 0x23)) return [[0x52, 0, 0x64, 0x60, 0x04, sub, 0, 0, 0, 0]];
+    return [];
+  },
+};
+const z1 = new ZoomG1(fake);
+z1.dev = 0x64;
+await z1.upload('TEST.ZDL', data, () => {});
+const write = sent.find(b => b[4] === 0x23);
+const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(write)))].map(b => b.toString(16).padStart(2, '0')).join('');
+say(write.length === 607 && sha === 'cd64cfdeaa2dedae3d15aa9dfb5b6e74c32113402cfe60b70af3b6558a8e0a8e', `upload write message = Python's (${write.length} bytes)`);
+const seq = sent.map(b => b.slice(3, 5).map(x => x.toString(16)).join(' ')).join(', ');
+say(seq === '60 27, 60 20, 60 5, 60 23, 60 5, 60 23, 60 21, 60 9', `upload sequence: ${seq}`);
+
+// DrumBox picture = src/drumbox/screen.png (<= mid-grey = dark = a set bit, as zdl.js)
+const z = parseZdl(await bytes('fixtures/DrumBox.ZDL'));
+say(z.isZdl && z.gid === 7 && z.fxid === 520 && z.name === 'DrumBox', `DrumBox header: ${z.name}, gid ${z.gid}, fxid ${z.fxid}, cost ${z.cost}, ${z.knobs.length} knobs (${z.knobs.map(k => k.name).join(', ')})`);
+say(z.knobs.length === 9, 'DrumBox has 9 knobs');
+const img = new Image();
+img.src = 'fixtures/drumbox-screen.png';
+await img.decode();
+const c = new OffscreenCanvas(PIC_W, PIC_H);
+const g = c.getContext('2d');
+g.drawImage(img, 0, 0);
+const px = g.getImageData(0, 0, PIC_W, PIC_H).data;
+let bad = 0;
+for (let y = 0; y < PIC_H; y++)
+  for (let x = 0; x < PIC_W; x++) {
+    const i = (y * PIC_W + x) * 4;
+    const dark = (px[i] + px[i + 1] + px[i + 2]) / 3 > 127 ? 0 : 1;
+    if (dark !== pixel(z.picture, x, y)) bad++;
+  }
+say(z.picture && bad === 0, `DrumBox picture vs screen.png: ${bad} pixels differ`);
+
+// Every stock effect from the G1Xon backup
+const dir = 'fixtures/g1xon/files/';
+const listing = await (await fetch(dir)).text();
+const names = [...listing.matchAll(/href="([^"]+\.ZDL)"/gi)].map(m => decodeURIComponent(m[1]));
+let pics = 0, named = 0;
+const noPic = [];
+for (const n of names) {
+  const r = parseZdl(await bytes(dir + n));
+  if (r.picture) pics++; else noPic.push(n);
+  if (r.name) named++;
+  if (r.error) say(false, `${n}: ${r.error}`);
+  if (pics <= 24 && r.picture) {
+    const cv = document.createElement('canvas');
+    cv.width = 192; cv.height = 128; cv.title = `${n} ${r.name} ${r.group} ${r.fxid}`;
+    document.getElementById('pics').append(cv);
+    drawPicture(cv, r.picture);
+  }
+}
+say(names.length > 0 && noPic.every(n => n === 'CMN_DRV.ZDL'), `${names.length} pedal ZDLs: ${pics} pictures, ${named} names; without picture: ${noPic.join(', ') || 'none'}`);
+
+// Copy pedal -> PC: a fake pedal answers flash reads (60 30) from the 2026-10-12 flash backup;
+// every file read through the file table must equal the file extracted by fs_extract.py.
+const image = await bytes('fixtures/g1xon/fs_a5000.bin');
+const FS = 0xA5000;
+let reads = 0, maxLen = 0;
+const flashPedal = {
+  xfer: async body => {
+    if (body[3] !== 0x60 || body[4] !== 0x30) return [];
+    const addr = body.slice(5, 10).reduce((s, x, i) => s + x * 2 ** (7 * i), 0) - FS;
+    const len = body.slice(10, 15).reduce((s, x, i) => s + x * 2 ** (7 * i), 0);
+    reads++;
+    maxLen = Math.max(maxLen, len);
+    const block = image.subarray(addr, addr + len);
+    return [[0x52, 0, 0x64, 0x60, 0x04, 0x30, 0, 0, len & 0x7F, len >> 7, ...pack7(block), ...u35((crc32(block) ^ 0xFFFFFFFF) >>> 0)]];
+  },
+};
+const zf = new ZoomG1(flashPedal);
+zf.dev = 0x64;
+const table = await zf.fileTable();
+let same = 0;
+const diff = [];
+for (const n of names) {
+  const want = await bytes(dir + n);
+  const got = await zf.readFile(n, table).catch(e => e);
+  if (got instanceof Uint8Array && got.length === want.length && got.every((b, i) => b === want[i])) same++;
+  else diff.push(`${n}: ${got instanceof Error ? got.message : 'differs'}`);
+}
+say(table.size >= names.length && same === names.length, `copy to PC: ${same} of ${names.length} files byte-exact from the flash image (${table.size} in the table, ${reads} reads, largest ${maxLen} B)${diff.length ? '; ' + diff.slice(0, 3).join('; ') : ''}`);
+
+out.textContent += fails ? `\n${fails} FAILED\n` : '\nALL PASSED\n';
+document.title = fails ? 'FAIL' : 'PASS';
+document.body.dataset.done = '1';
+</script>
+</body>
+</html>

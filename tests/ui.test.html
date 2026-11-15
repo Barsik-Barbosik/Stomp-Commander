@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stomp Commander UI test</title>
+<link rel="stylesheet" href="../app.css">
+</head>
+<body>
+<script type="module">
+// The app's page with a fake PC folder (the G1Xon backup + DrumBox) instead of the folder picker.
+// Serve this folder and open http://localhost:8000/tests/ui.test.html
+const html = await (await fetch('../index.html')).text();
+document.body.innerHTML = new DOMParser().parseFromString(html, 'text/html').body.innerHTML;
+const app = await import('../js/main.js');
+
+const dir = 'fixtures/g1xon/files/';
+const names = [...(await (await fetch(dir)).text()).matchAll(/href="([^"]+\.ZDL)"/gi)].map(m => decodeURIComponent(m[1]));
+const files = await Promise.all([...names.map(n => [dir + n, n]), ['fixtures/DrumBox.ZDL', 'DrumBox.ZDL']]
+  .map(async ([url, name]) => new File([await (await fetch(url)).arrayBuffer()], name, { lastModified: 1 })));
+const fake = {
+  name: 'g1xon-backup', kind: 'directory',
+  async *values() {
+    yield { kind: 'directory', name: 'sub', async *values() { for (const f of files.slice(0, 2)) yield { kind: 'file', name: f.name, getFile: async () => f }; } };
+    for (const f of files) yield { kind: 'file', name: f.name, getFile: async () => f };
+  },
+};
+await app.openFolder(fake);
+await new Promise(r => setTimeout(r, 3000));
+
+const row = [...document.querySelectorAll('#pc-list tr')].find(tr => tr.dataset.name === 'DrumBox.ZDL');
+row.scrollIntoView();
+row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+const cli = document.getElementById('cli');
+for (const cmd of ['info DrumBox.ZDL', 'list pedal', 'put DRUMBOX.ZDL']) {
+  cli.value = cmd;
+  cli.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await new Promise(r => setTimeout(r, 200));
+}
+// Sort by category (Amp first), then check the subfolder's ".." row.
+document.querySelector('#pc-list th[data-sort="category"]').click();
+const firstCat = document.querySelector('#pc-list tbody tr:nth-child(2) td.meta').textContent;
+const thumbs = document.querySelectorAll('#pc-list canvas.thumb').length;
+// Suggestions: "pu" offers put, Tab takes it, then "Dru" offers DrumBox.ZDL.
+const ta = document.getElementById('cli');
+const type = text => { ta.value = text; ta.selectionStart = ta.selectionEnd = text.length; ta.dispatchEvent(new Event('input')); };
+const shown = () => [...document.querySelectorAll('#suggest li span:first-child')].map(s => s.textContent).join('/');
+type('pu');
+const s1 = shown();
+ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+const afterTab = ta.value;
+type(afterTab + 'Dru');
+const s2 = shown();
+ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+ta.value = '';
+const subRow = [...document.querySelectorAll('#pc-list tbody tr')].find(tr => tr.dataset.name === 'sub');
+subRow.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+await new Promise(r => setTimeout(r, 1000));
+const inSub = `${document.getElementById('pc-title').textContent}: ${[...document.querySelectorAll('#pc-list tbody tr')].map(tr => tr.cells[1].textContent).join(', ')}`;
+document.querySelector('#pc-list tr.up').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+await new Promise(r => setTimeout(r, 2000));
+document.querySelector('#pc-list th[data-sort="size"]').click();
+document.querySelector('#pc-list th[data-sort="size"]').click();
+const biggest = document.querySelector('#pc-list tbody tr:nth-child(2)').dataset.name;
+document.querySelector('#pc-list th[data-sort="effect"]').click();
+const byEffect = [...document.querySelectorAll('#pc-list tbody tr')].slice(1, 4).map(tr => `${tr.querySelector('td.effect').textContent}=${tr.dataset.name}`).join(' ');
+// Mouse sweep: press on row 3, move over row 6, release = rows 3..6 selected.
+const trs = document.querySelectorAll('#pc-list tbody tr');
+trs[3].cells[1].dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+trs[6].cells[1].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+trs[6].cells[1].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+const swept = document.querySelectorAll('#pc-list tbody tr.sel').length;
+// Resize: drag the handle between the panels to x = 500.
+const gx = document.getElementById('split-x');
+const gr = gx.getBoundingClientRect();
+gx.setPointerCapture = () => {}; gx.hasPointerCapture = () => true;
+gx.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: gr.left + 4, clientY: gr.top + 50 }));
+gx.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: 500, clientY: gr.top + 50 }));
+gx.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, clientX: 500, clientY: gr.top + 50 }));
+const pcWidth = Math.round(document.getElementById('pc').getBoundingClientRect().right);
+document.title = `rows ${document.querySelectorAll('#pc-list tbody tr').length}, thumbs ${thumbs}, first by category: ${firstCat}, in sub: ${inSub}, biggest: ${biggest}, swept ${swept}, by name: ${byEffect}, suggest [${s1}] tab "${afterTab}" [${s2}], pc panel right edge ${pcWidth}, title ${document.getElementById('pc-title').innerHTML}`;
+document.body.dataset.result = document.title;
+</script>
+</body>
+</html>

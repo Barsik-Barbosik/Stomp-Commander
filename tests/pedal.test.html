@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stomp Commander pedal test</title>
+<link rel="stylesheet" href="../app.css">
+</head>
+<body>
+<script type="module">
+// The app against a fake G1Xon behind a fake Web MIDI: identity, file list (60 25/26), disk usage
+// (60 29) and raw flash reads (60 30) from the 2026-10-12 flash backup, with the saved
+// FLST_SEQ.ZDT (2026-10-25) written over the table entry and blocks of one big file.
+// Serve this folder and open http://localhost:8000/tests/pedal.test.html
+import { pack7, crc32, u35 } from '../js/zoomg1.js';
+
+const bytes = async url => new Uint8Array(await (await fetch(url)).arrayBuffer());
+const image = await bytes('fixtures/g1xon/fs_a5000.bin');
+const flst = await bytes('fixtures/g1xon/FLST_SEQ_20261025.ZDT');
+const FS = 0xA5000, BLK = 4096;
+const le16 = o => image[o] | (image[o + 1] << 8);
+const le32 = o => (image[o] | (image[o + 1] << 8) | (image[o + 2] << 16) | (image[o + 3] << 24)) >>> 0;
+
+// Main file table (same choice as ZoomG1.fileTable) and its files.
+let tpos = -1;
+for (let i = 0; i < 4 && tpos < 0; i++) {
+  const p = BLK * (3 + 2 * i);
+  if (image[p + 1] === 0xA5 && image[p + 5] === 0xFF && image[p + 4] === 0xFF) tpos = p;
+}
+const files = [];
+for (let o = tpos + 8; o + 32 <= tpos + 2 * BLK; o += 32) {
+  if (image.subarray(o, o + 8).every(b => b === 0xFF)) continue;
+  const raw = image.subarray(o + 8, o + 20), end = raw.indexOf(0);
+  const name = String.fromCharCode(...(end < 0 ? raw : raw.subarray(0, end)));
+  if (name) files.push({ o, name, addr: le16(o), size: le32(o + 4) });
+}
+// FLST_SEQ.ZDT replaces the first file of 2+ blocks (its first two blocks hold the 4,108 bytes).
+const victim = files.find(f => f.size > 4090 && !f.name.startsWith('FLST'));
+{
+  const b1 = BLK * (10 + victim.addr), b2 = BLK * (10 + le16(b1 + 2));
+  image.set(flst.subarray(0, 4090), b1 + 6);
+  image[b1 + 4] = 4090 & 0xFF; image[b1 + 5] = 4090 >> 8;
+  image.set(flst.subarray(4090), b2 + 6);
+  image[b2 + 2] = 0xFF; image[b2 + 3] = 0xFF; image[b2 + 4] = 18; image[b2 + 5] = 0;
+  image.fill(0, victim.o + 8, victim.o + 20);
+  image.set(Array.from('FLST_SEQ.ZDT', c => c.charCodeAt(0)), victim.o + 8);
+  image.set([4108 & 0xFF, 4108 >> 8, 0, 0], victim.o + 4);
+  victim.name = 'FLST_SEQ.ZDT';
+  victim.size = 4108;
+}
+
+// Fake pedal: answers like the G1Xon (messages without F0 / F7).
+let findAt = 0;
+const counts = {};
+function reply(m) {
+  if (m[0] === 0x7E) return [[0x7E, 0x00, 0x06, 0x02, 0x52, 0x64, 0x00, 0x01, 0x00, 0x31, 0x2E, 0x32, 0x31]];
+  if (m[0] !== 0x52 || m[3] !== 0x60) return [];
+  const sub = m[4];
+  counts[sub] = (counts[sub] || 0) + 1;
+  if (sub === 0x25 || sub === 0x26) {
+    if (sub === 0x25) findAt = 0;
+    const f = files[findAt++];
+    if (!f) return [[0x52, 0, 0x64, 0x60, 0x03, 0x7A, 0x7F, 0x7F, 0x7F, 0x0F]];
+    const r = [0x52, 0, 0x64, 0x60, 0x04, sub, 0, 0, 0, 0, 0, 0, 0, 0];
+    const nm = Array.from(f.name.padEnd(15, '\0'), c => c.charCodeAt(0));
+    return [[...r, ...nm, ...u35(f.size)]];
+  }
+  if (sub === 0x29) return [[0x52, 0, 0x64, 0x60, 0x04, 0x29, 0, 0, 0, 0, ...u35(778 * 4090), ...u35(3 * 4090)]];
+  if (sub === 0x30) {
+    const addr = m.slice(5, 10).reduce((s, x, i) => s + x * 2 ** (7 * i), 0) - FS;
+    const len = m.slice(10, 15).reduce((s, x, i) => s + x * 2 ** (7 * i), 0);
+    const block = image.subarray(addr, addr + len);
+    return [[0x52, 0, 0x64, 0x60, 0x04, 0x30, 0, 0, len & 0x7F, len >> 7, ...pack7(block), ...u35((crc32(block) ^ 0xFFFFFFFF) >>> 0)]];
+  }
+  return [];
+}
+const input = { name: 'ZOOM 1 Series', manufacturer: 'ZOOM', state: 'connected', onmidimessage: null, open: async () => {}, close: async () => {} };
+const output = {
+  name: 'ZOOM 1 Series', manufacturer: 'ZOOM', state: 'connected', open: async () => {}, close: async () => {},
+  send: data => {
+    const m = Array.from(data).slice(1, -1);
+    for (const r of reply(m)) setTimeout(() => input.onmidimessage?.({ data: Uint8Array.from([0xF0, ...r, 0xF7]) }), 2);
+  },
+};
+// A port left behind by a replug: same name, state disconnected, sends go nowhere. Listed first.
+const stale = { name: 'ZOOM 1 Series', manufacturer: 'ZOOM', state: 'disconnected', onmidimessage: null, open: async () => {}, close: async () => {}, send: () => {} };
+navigator.requestMIDIAccess = async () => ({ inputs: new Map([['i0', stale], ['i', input]]), outputs: new Map([['o0', stale], ['o', output]]), onstatechange: null });
+
+const html = await (await fetch('../index.html')).text();
+document.body.innerHTML = new DOMParser().parseFromString(html, 'text/html').body.innerHTML;
+await import('../js/main.js');
+await new Promise(r => setTimeout(r, 2500));          // start(): IndexedDB gives up after 2 s headless
+document.getElementById('pedal-connect').click();
+const t0 = performance.now();
+let sawLocked = false;
+while (!document.querySelector('#pedal-list tbody tr') && performance.now() - t0 < 60000) {
+  if (document.body.classList.contains('locked') && getComputedStyle(document.getElementById('pc-list')).pointerEvents === 'none') sawLocked = true;
+  await new Promise(r => setTimeout(r, 200));
+}
+await new Promise(r => setTimeout(r, 1500));
+// Select a pedal file that has no PC copy: the preview shows "No picture".
+document.querySelector('#pedal-list tbody tr').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+const rows = [...document.querySelectorAll('#pedal-list tbody tr')];
+const cat = n => rows.find(tr => tr.dataset.name === n)?.querySelector('td.meta').textContent;
+document.querySelector('#pedal-list th[data-sort="category"]').click();
+const sorted = [...document.querySelectorAll('#pedal-list tbody tr')].map(tr => tr.querySelector('td.meta').textContent);
+const withCat = sorted.filter(Boolean).length;
+const order = [...new Set(sorted.filter(Boolean))].join(' | ');
+// Disconnect, then Connect again: the list must come back.
+document.getElementById('pedal-connect').click();
+const goneAfter = document.querySelectorAll('#pedal-list tbody tr').length;
+document.getElementById('pedal-connect').click();
+const t1 = performance.now();
+while (!document.querySelector('#pedal-list tbody tr') && performance.now() - t1 < 60000) await new Promise(r => setTimeout(r, 200));
+const reconnect = `rows after disconnect ${goneAfter}, after reconnect ${document.querySelectorAll('#pedal-list tbody tr').length}`;
+const icons = t => document.querySelectorAll(`#pedal-list .thumb-missing[title="${t}"]`).length;
+document.body.dataset.result = `${reconnect}; locked while reading ${sawLocked}, unlocked after ${!document.body.classList.contains('locked')}; icons: no picture ${icons('No picture')}, list ${icons('Effect list')}, drum ${icons('Drum sample data')}; rows ${rows.length}, with group ${withCat}; COMP ${cat('COMP.ZDL')}, _B_BOOST ${cat('_B_BOOST.ZDL')}, _DI5 ${cat('_DI5.ZDL')}, `
+  + `DRUMBOX ${cat('DRUMBOX.ZDL') || '-'}; flash reads ${counts[0x30]}; groups in order: ${order}; title: ${document.getElementById('pedal-title').innerHTML}`;
+</script>
+</body>
+</html>

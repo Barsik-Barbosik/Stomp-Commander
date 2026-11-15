@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stomp Commander MultiStomp test</title>
+<link rel="stylesheet" href="../app.css">
+</head>
+<body>
+<script type="module">
+// The app against a fake MS-70CDR (device 0x61) behind a fake Web MIDI, with an in-memory file
+// system that answers the file commands as themanro's docs/EFFECT-INSTALL-PROTOCOL.md describes.
+// Steps: connect; upload FLOPPY.ZDL (new effect: file, then its FLST_SEQ.ZDT record); upload
+// DRUMBX2.ZDL (a copy of DrumBox: same effect id as DRUMBOX.ZDL, which goes first, record and file);
+// delete FLOPPY.ZDL (record, then file); `patch` is refused. The write message must equal
+// file_probe.html's writeBlock for the same bytes.
+// Serve this folder and open http://localhost:8000/tests/ms.test.html
+import { pack7, unpack7, crc32, u35 } from '../js/zoomg1.js';
+
+const bytes = async url => new Uint8Array(await (await fetch(url)).arrayBuffer());
+const drumbox = await bytes('fixtures/DrumBox.ZDL');
+const floppy = await bytes('fixtures/Floppy.ZDL');
+const DEV = 0x61;
+const asc = s => Array.from(s, c => c.charCodeAt(0));
+
+// FLST_SEQ.ZDT: 13-byte records, 4,108 bytes; groups 7 (SFX) and 8 (delay).
+const rec = (head, n = 13) => [...head, ...Array(n - head.length).fill(0)];
+const flst = new Uint8Array(4108);
+flst.set([
+  ...rec([...asc('>>>'), 0, 7]), ...rec(asc('RING.ZDL')), ...rec(asc('DRUMBOX.ZDL')), ...rec([...asc('<<<'), 0]),
+  ...rec([...asc('>>>'), 0, 8]), ...rec(asc('DELAY.ZDL')), ...rec([...asc('<<<'), 0]),
+]);
+const ringData = Uint8Array.from({ length: 900 }, (_, i) => i & 0xFF);
+const fs = new Map([['FLST_SEQ.ZDT', flst], ['RING.ZDL', ringData], ['DRUMBOX.ZDL', drumbox], ['DELAY.ZDL', ringData.slice(0, 300)]]);
+
+// Fake pedal (messages without F0 / F7).
+const trace = [];          // "sub" or "sub:NAME" of every 60 message; "c50" etc. for 50 / 51 / 52 / 53 / 29 / 31
+const writes = [];         // every 60 23 message
+let find = null, rd = null, wr = null;
+const nameAt = (m, at) => String.fromCharCode(...m.slice(at, m.indexOf(0, at)));
+const ST = [[0x52, 0, DEV, 0x60, 0x03, 0, 0, 0, 0, 0]];
+const ack = sub => [[0x52, 0, DEV, 0x60, 0x04, sub, 0, 0, 0, 0, 0, 0, 0, 0, 0]];
+const h = x => x.toString(16).padStart(2, '0');
+function reply(m) {
+  if (m[0] === 0x7E) trace.push('id');
+  if (m[0] === 0x7E) return [[0x7E, 0x00, 0x06, 0x02, 0x52, DEV, 0x00, 0x01, 0x00, ...asc('2.10')]];
+  if (m[0] !== 0x52 || m[2] !== DEV) return [];
+  if ([0x50, 0x51, 0x52, 0x53, 0x29, 0x31].includes(m[3])) { trace.push(`c${h(m[3])}`); return []; }
+  if (m[3] !== 0x60) return [];
+  const sub = m[4];
+  const nm = sub === 0x25 ? nameAt(m, 7) : sub === 0x24 ? nameAt(m, 5) : sub === 0x20 ? nameAt(m, 15) : '';
+  trace.push(nm && nm !== '*' ? `${h(sub)}:${nm}` : h(sub));
+  switch (sub) {
+    case 0x25:
+      find = [...fs.keys()].filter(n => nm === '*' || n === nm.toUpperCase());
+      // falls through
+    case 0x26: {
+      const n = find?.shift();
+      if (!n) return [[0x52, 0, DEV, 0x60, 0x03, 0x7A, 0x7F, 0x7F, 0x7F, 0x0F]];
+      return [[0x52, 0, DEV, 0x60, 0x04, sub, 0, 0, 0, 0, 0, 0, 0, 0, ...asc(n.padEnd(15, '\0')), ...u35(fs.get(n).length)]];
+    }
+    case 0x29: return [[0x52, 0, DEV, 0x60, 0x04, 0x29, 0, 0, 0, 0, ...u35(700 * 4090), ...u35(34 * 4090)]];
+    case 0x20:
+      if (m[5] === 0x02) rd = { data: fs.get(nm.toUpperCase()) || new Uint8Array(0), pos: 0, pending: false };
+      else { wr = nm.toUpperCase(); fs.set(wr, new Uint8Array(0)); }
+      return ack(0x20);
+    case 0x22:
+      if (rd) rd.pending = true;
+      return [[0x52, 0, DEV, 0x60, 0x04, 0x22, 0x00, 0, 0, 0]];
+    case 0x05: {
+      if (!rd?.pending) return ST;
+      rd.pending = false;
+      const blk = rd.data.subarray(rd.pos, rd.pos + 512);
+      rd.pos += blk.length;
+      return [[0x52, 0, DEV, 0x60, 0x04, 0x22, 0x01, 0, blk.length & 0x7F, blk.length >> 7, ...pack7(blk), ...u35((crc32(blk) ^ 0xFFFFFFFF) >>> 0)]];
+    }
+    case 0x23: {
+      writes.push(m.slice(3));
+      const n = m[10] | (m[11] << 7);
+      const d = Uint8Array.from(unpack7(m.slice(15, -5)).slice(0, n));
+      const crc = (m.at(-5) | (m.at(-4) << 7) | (m.at(-3) << 14) | (m.at(-2) << 21) | ((m.at(-1) & 0x0F) << 28)) >>> 0;
+      if (!wr || ((crc ^ 0xFFFFFFFF) >>> 0) !== crc32(d)) return [];
+      const old = fs.get(wr), next = new Uint8Array(old.length + d.length);
+      next.set(old); next.set(d, old.length);
+      fs.set(wr, next);
+      return ack(0x23);
+    }
+    case 0x24: fs.delete(nm.toUpperCase()); return ST;
+    case 0x21: case 0x09: rd = null; wr = null; return ST;
+    case 0x27: return ST;
+  }
+  return [];
+}
+const input = { name: 'ZOOM MS Series', manufacturer: 'ZOOM', state: 'connected', onmidimessage: null, open: async () => {}, close: async () => {} };
+const output = {
+  name: 'ZOOM MS Series', manufacturer: 'ZOOM', state: 'connected', open: async () => {}, close: async () => {},
+  send: data => {
+    const m = Array.from(data);
+    if (m[0] !== 0xF0) return;
+    for (const r of reply(m.slice(1, -1))) setTimeout(() => input.onmidimessage?.({ data: Uint8Array.from([0xF0, ...r, 0xF7]) }), 2);
+  },
+};
+navigator.requestMIDIAccess = async () => ({ inputs: new Map([['i', input]]), outputs: new Map([['o', output]]), onstatechange: null });
+window.confirm = () => true;
+
+const html = await (await fetch('../index.html')).text();
+document.body.innerHTML = new DOMParser().parseFromString(html, 'text/html').body.innerHTML;
+await import('../js/main.js');
+await new Promise(r => setTimeout(r, 2500));          // start(): IndexedDB gives up after 2 s headless
+
+const out = [];
+let fails = 0;
+const say = (ok, text) => { if (!ok) fails++; out.push(`${ok ? 'ok  ' : 'FAIL'} ${text}`); };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Wait for the operation to start (a dropped file is read first), then for 1.5 s without one.
+const locked = () => document.body.classList.contains('locked');
+const idle = async () => {
+  const t = performance.now();
+  while (!locked() && performance.now() - t < 5000) await sleep(20);
+  for (let calm = 0; calm < 1500;) { await sleep(100); calm = locked() ? 0 : calm + 100; }
+};
+const listNames = () => {
+  const l = fs.get('FLST_SEQ.ZDT'), o = [];
+  for (let at = 0; at + 13 <= l.length; at += 13) if (l[at]) o.push(String.fromCharCode(...l.subarray(at, at + 12)).replace(/\0+$/, '').replace(/\0.*/, ''));
+  return o.join(' ');
+};
+const same = (a, b) => a && b && a.length === b.length && a.every((x, i) => x === b[i]);
+const logText = () => document.getElementById('log').textContent;
+
+document.getElementById('pedal-connect').click();
+await idle();
+const t0 = performance.now();
+while (!document.querySelector('#pedal-list tbody tr') && performance.now() - t0 < 60000) await sleep(200);
+await idle();
+const title = document.getElementById('pedal-title').textContent;
+say(/MS-70CDR, firmware 2\.10/.test(title), `title: ${title}`);
+say(document.querySelectorAll('#pedal-list tbody tr').length === 4, `pedal rows ${document.querySelectorAll('#pedal-list tbody tr').length}`);
+say(!document.getElementById('pedal-flst'), 'no "Delete effect list" button');
+say(!trace.includes('c52') && !trace.includes('c53'), 'no PC mode (52 / 53) sent');
+say(!trace.includes('c50') && !trace.includes('c51'), 'no editor mode (50 / 51) sent');
+
+const drop = async (name, data) => {
+  const dt = new DataTransfer();
+  dt.items.add(new File([data], name));
+  document.getElementById('pedal-list').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  await idle();
+};
+
+// 1. A new effect.
+const mark = trace.length;
+await drop('Floppy.ZDL', floppy);
+say(same(fs.get('FLOPPY.ZDL'), floppy), `FLOPPY.ZDL on the pedal byte-exact (${fs.get('FLOPPY.ZDL')?.length} B)`);
+say(listNames() === '>>> RING.ZDL DRUMBOX.ZDL FLOPPY.ZDL <<< >>> DELAY.ZDL <<<', `list after upload: ${listNames()}`);
+say(fs.get('FLST_SEQ.ZDT').length === 4108, 'list stays 4,108 bytes');
+const blocks = Math.ceil(floppy.length / 512);
+const want = ['25:FLOPPY.ZDL', '05', '27', '24:FLOPPY.ZDL', '20:FLOPPY.ZDL', '05', ...Array(blocks).fill(['23', '05']).flat(), '21', '09',
+  '20:FLOPPY.ZDL', ...Array(blocks + 1).fill(['05', '22', '05']).flat(), '21', '09'].join(' ');
+say(trace.slice(mark).join(' ').includes(want), `write sequence (file, then read back): ${want.slice(0, 80)}…`);
+const fl = trace.slice(mark).join(' ');
+say(fl.indexOf('24:FLST_SEQ.ZDT') > fl.indexOf('20:FLOPPY.ZDL'), 'effect file written before its list record');
+// file_probe.html's writeBlock for the same 512 bytes
+const chunk = floppy.subarray(0, 512), crc = (crc32(chunk) ^ 0xffffffff) >>> 0;
+const probe = [0x60, 0x23, 0x40, 0x00, 0x00, 0x00, 0x00, chunk.length & 0x7f, (chunk.length >> 7) & 0x7f, 0x00, 0x00, 0x00,
+  ...pack7(chunk), crc & 0x7f, (crc >>> 7) & 0x7f, (crc >>> 14) & 0x7f, (crc >>> 21) & 0x7f, (crc >>> 28) & 0x0f];
+const first = writes.find(w => same(Uint8Array.from(unpack7(w.slice(12, -5)).slice(0, 512)), chunk));
+say(first && same(first, probe), `write message = file_probe.html's (${first?.length} bytes)`);
+
+// 2. Same effect id as DRUMBOX.ZDL: that one goes (record first), DRUMBX2.ZDL comes in.
+const mark2 = trace.length;
+await drop('DRUMBX2.ZDL', drumbox);
+say(!fs.has('DRUMBOX.ZDL') && same(fs.get('DRUMBX2.ZDL'), drumbox), `clash: DRUMBOX.ZDL deleted, DRUMBX2.ZDL written`);
+say(listNames() === '>>> RING.ZDL FLOPPY.ZDL DRUMBX2.ZDL <<< >>> DELAY.ZDL <<<', `list after clash: ${listNames()}`);
+const t2 = trace.slice(mark2).join(' ');
+say(t2.indexOf('24:FLST_SEQ.ZDT') < t2.indexOf('24:DRUMBOX.ZDL'), 'record removed before the file');
+
+// 3. Delete with the command line (record first, then the file).
+const cli = document.getElementById('cli');
+const run = async line => { cli.value = line; cli.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await idle(); };
+await run('delete FLOPPY.ZDL -y');
+say(!fs.has('FLOPPY.ZDL'), 'FLOPPY.ZDL deleted');
+say(listNames() === '>>> RING.ZDL DRUMBX2.ZDL <<< >>> DELAY.ZDL <<<', `list after delete: ${listNames()}`);
+await run('delete FLST_SEQ.ZDT -y');
+say(fs.has('FLST_SEQ.ZDT'), 'the effect list is never deleted on a MultiStomp');
+
+// 4. G1on-only commands.
+await run('patch');
+await run('knob 0 2 50');
+say(!trace.includes('c50') && !trace.includes('c51'), 'no editor mode (50 / 51) after upload / delete');
+say((logText().match(/G1on family only/g) || []).length === 2 && !trace.includes('c29') && !trace.includes('c31'), 'patch / knob refused on a MultiStomp, nothing sent');
+const ids = () => trace.filter(x => x === 'id').length;
+// Start the 31 s window right after a ping: pings 30 s apart then give exactly one more in it.
+const idsStart = ids();
+for (let t = 0; t < 31 && ids() === idsStart; t++) await sleep(1000);
+const before = ids();
+await sleep(31000);
+await run('keepalive');
+say(before === idsStart + 1 && ids() === before + 1 && /Keep-alive: every 30 s, [1-9]\d* pings? answered/.test(logText()), `keep-alive: one identity request in 31 idle seconds after a ping (${ids() - before})`);
+
+out.push(fails ? `${fails} FAILED` : 'ALL PASSED');
+document.body.dataset.result = out.join('\n');
+document.title = fails ? 'FAIL' : 'PASS';
+</script>
+</body>
+</html>

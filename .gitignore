@@ -1,0 +1,3 @@
+# test fixtures: Zoom's stock effects and a pedal flash backup, not shareable
+tests/fixtures/*
+!tests/fixtures/README.md

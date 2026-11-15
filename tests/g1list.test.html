@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stomp Commander G1on effect list test</title>
+<link rel="stylesheet" href="../app.css">
+</head>
+<body>
+<script type="module">
+// The effect list (FLST_SEQ.ZDT) on a G1on-family pedal: the app against a fake G1Xon whose file
+// commands work on an in-memory file system (ZoomG1's file methods replaced; the MIDI fake only
+// answers the identity request). Steps: connect; upload FLOPPY.ZDL (file, then the list as
+// delete + upload, read back); upload SONGBOX.ZDL + G11TEST.ZDL (gid 11, no group) in one drop:
+// one list write, G11TEST not listed (error); DRUMBX2.ZDL (DrumBox's id): DRUMBOX's record,
+// then its file; `delete FLOPPY.ZDL` (record, then file); `delete FLST_SEQ.ZDT`; uploads with no
+// list (nothing edited; a pedal that writes its own list with the upload); a pedal that writes its
+// own list over the uploaded one (read-back fails, the old list is downloaded, the list not deleted).
+// Serve this folder and open http://localhost:8000/tests/g1list.test.html
+import { ZoomG1 } from '../js/zoomg1.js';
+
+const bytes = async url => new Uint8Array(await (await fetch(url)).arrayBuffer());
+const drumbox = await bytes('fixtures/DrumBox.ZDL');
+const floppy = await bytes('fixtures/Floppy.ZDL');
+const songbox = await bytes('fixtures/SongBox.ZDL');
+const g11 = Uint8Array.from(floppy);
+g11[0x3C] = 11;                      // gid 11: no group in the list
+g11[0x40] = 0xF0; g11[0x41] = 0x03;  // fxid 1008: no clash with Floppy
+const LIST = 'FLST_SEQ.ZDT';
+const asc = s => Array.from(s, c => c.charCodeAt(0));
+
+// A G1on list: groups 0 (empty), 7 (SFX) and 8 (delay); the close marker repeats the gid.
+const rec = (head, n = 13) => [...head, ...Array(n - head.length).fill(0)];
+const group = (gid, names) => [...rec([...asc('>>>'), 0, gid]), ...names.flatMap(n => rec(asc(n))), ...rec([...asc('<<<'), 0, gid])];
+const makeList = groups => { const l = new Uint8Array(4108); l.set(groups.flatMap(([g, n]) => group(g, n))); return l; };
+const fs = new Map([[LIST, makeList([[0, []], [7, ['DRUMBOX.ZDL']], [8, ['DELAY.ZDL']]])], ['DRUMBOX.ZDL', drumbox], ['DELAY.ZDL', floppy.slice(0, 300)]]);
+fs.get('DELAY.ZDL')[0x3C] = 8;
+
+// The pedal's own list: every ZDL in the group of its header byte 0x3C.
+const ownList = () => {
+  const by = new Map();
+  for (const [n, d] of fs) if (/\.ZDL$/.test(n)) by.set(d[0x3C], [...(by.get(d[0x3C]) || []), n]);
+  return makeList([[0, []], ...[...by].sort((a, b) => a[0] - b[0])]);
+};
+const pedalMode = { writesOwnList: false, overwritesList: false };
+const trace = [];
+const P = ZoomG1.prototype;
+P.session = async function (fn) { return fn(); };
+P.listing = async function () { return [...fs].map(([name, d]) => ({ name, size: d.length })); };
+P.stat = async function (name) { const d = fs.get(name.toUpperCase()); return d ? { name: name.toUpperCase(), size: d.length } : null; };
+P.diskUsage = async function () { return { max: 778 * 4090, avail: 100 * 4090 }; };
+P.upload = async function (name, data) {
+  name = name.toUpperCase();
+  trace.push(`put:${name}`);
+  // As seen on the G1Xon: with no list, an upload makes the pedal write one.
+  const own = !fs.has(LIST) && pedalMode.writesOwnList;
+  fs.set(name, Uint8Array.from(data));
+  if (own || (name === LIST && pedalMode.overwritesList)) fs.set(LIST, ownList());
+};
+P.delete = async function (name) { trace.push(`del:${name.toUpperCase()}`); return fs.delete(name.toUpperCase()); };
+P.fileTable = async function () { return new Map([...fs].map(([name, d]) => [name, { name, addr: 0, size: d.length }])); };
+P.readFile = async function (name) { trace.push(`read:${name.toUpperCase()}`); return Uint8Array.from(fs.get(name.toUpperCase())); };
+P.readHead = async function (ent, length) { return fs.get(ent.name.toUpperCase()).slice(0, length); };
+
+const input = { name: 'ZOOM 1 Series', manufacturer: 'ZOOM', state: 'connected', onmidimessage: null, open: async () => {}, close: async () => {} };
+const output = {
+  name: 'ZOOM 1 Series', manufacturer: 'ZOOM', state: 'connected', open: async () => {}, close: async () => {},
+  send: data => {
+    if (data[1] !== 0x7E) return;
+    setTimeout(() => input.onmidimessage?.({ data: Uint8Array.from([0xF0, 0x7E, 0x00, 0x06, 0x02, 0x52, 0x64, 0x00, 0x01, 0x00, 0x31, 0x2E, 0x32, 0x31, 0xF7]) }), 2);
+  },
+};
+navigator.requestMIDIAccess = async () => ({ inputs: new Map([['i', input]]), outputs: new Map([['o', output]]), onstatechange: null });
+window.confirm = () => true;
+const downloads = [];
+HTMLAnchorElement.prototype.click = function () { downloads.push(this.download); };
+
+const html = await (await fetch('../index.html')).text();
+document.body.innerHTML = new DOMParser().parseFromString(html, 'text/html').body.innerHTML;
+await import('../js/main.js');
+await new Promise(r => setTimeout(r, 2500));          // start(): IndexedDB gives up after 2 s headless
+
+const out = [];
+let fails = 0;
+const say = (ok, text) => { if (!ok) fails++; out.push(`${ok ? 'ok  ' : 'FAIL'} ${text}`); };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const locked = () => document.body.classList.contains('locked');
+const idle = async () => {
+  const t = performance.now();
+  while (!locked() && performance.now() - t < 5000) await sleep(20);
+  for (let calm = 0; calm < 1500;) { await sleep(100); calm = locked() ? 0 : calm + 100; }
+};
+const listNames = () => {
+  const l = fs.get(LIST);
+  if (!l) return '(none)';
+  const o = [];
+  for (let at = 0; at + 13 <= l.length; at += 13) {
+    if (!l[at]) continue;
+    const m = String.fromCharCode(l[at], l[at + 1], l[at + 2]);
+    o.push(l[at + 3] === 0 && (m === '>>>' || m === '<<<') ? `${m}${l[at + 4]}` : String.fromCharCode(...l.subarray(at, at + 12)).replace(/\0.*/, ''));
+  }
+  return o.join(' ');
+};
+const logText = () => document.getElementById('log').textContent;
+const drop = async (...files) => {
+  const dt = new DataTransfer();
+  for (const [name, data] of files) dt.items.add(new File([data], name));
+  document.getElementById('pedal-list').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  await idle();
+};
+const cli = document.getElementById('cli');
+const run = async line => { cli.value = line; cli.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await idle(); };
+const since = mark => trace.slice(mark).join(' ');
+const listPuts = mark => trace.slice(mark).filter(t => t === `put:${LIST}`).length;
+
+document.getElementById('pedal-connect').click();
+await idle();
+const t0 = performance.now();
+while (!document.querySelector('#pedal-list tbody tr') && performance.now() - t0 < 60000) await sleep(200);
+await idle();
+say(/G1on family, firmware 1\.21/.test(document.getElementById('pedal-title').textContent), `title: ${document.getElementById('pedal-title').textContent}`);
+say(!document.getElementById('pedal-flst'), 'no "Delete effect list" button');
+
+// 1. A new effect: file, then the list (delete + upload + read back).
+let m = trace.length;
+await drop(['Floppy.ZDL', floppy]);
+say(listNames() === '>>>0 <<<0 >>>7 DRUMBOX.ZDL FLOPPY.ZDL <<<7 >>>8 DELAY.ZDL <<<8', `list after upload: ${listNames()}`);
+say(fs.get(LIST).length === 4108, 'list stays 4,108 bytes');
+let t = since(m);
+say(t.indexOf('put:FLOPPY.ZDL') < t.indexOf(`del:${LIST}`) && t.indexOf(`del:${LIST}`) < t.indexOf(`put:${LIST}`)
+  && t.lastIndexOf(`read:${LIST}`) > t.indexOf(`put:${LIST}`), `effect file, then list delete + upload + read back: ${t}`);
+say(!/to see the new effects/.test(logText()), 'no restart asked');
+
+// 2. Two effects in one drop: one list write; gid 11 has no group: an error, not listed.
+m = trace.length;
+await drop(['SongBox.ZDL', songbox], ['G11Test.ZDL', g11]);
+say(listNames() === '>>>0 <<<0 >>>7 DRUMBOX.ZDL FLOPPY.ZDL SONGBOX.ZDL <<<7 >>>8 DELAY.ZDL <<<8', `list after two uploads: ${listNames()}`);
+say(listPuts(m) === 1, `one list write for the drop (${listPuts(m)})`);
+say(/G11TEST\.ZDL is on the pedal but not in FLST_SEQ\.ZDT \(FLST_SEQ\.ZDT has no group 11\)/.test(logText()), 'gid 11: error in the log');
+
+// 3. Same effect id as DRUMBOX.ZDL: its record goes, then the file; DRUMBX2.ZDL is added.
+m = trace.length;
+await drop(['DRUMBX2.ZDL', drumbox]);
+t = since(m);
+say(!fs.has('DRUMBOX.ZDL') && fs.has('DRUMBX2.ZDL'), 'clash: DRUMBOX.ZDL deleted, DRUMBX2.ZDL written');
+say(t.indexOf(`put:${LIST}`) < t.indexOf('del:DRUMBOX.ZDL'), 'record removed before the file');
+say(listNames() === '>>>0 <<<0 >>>7 FLOPPY.ZDL SONGBOX.ZDL DRUMBX2.ZDL <<<7 >>>8 DELAY.ZDL <<<8', `list after clash: ${listNames()}`);
+
+// 4. Replacing a listed effect leaves the list alone.
+m = trace.length;
+await drop(['Floppy.ZDL', floppy]);
+say(listPuts(m) === 0, 'replacing FLOPPY.ZDL: no list write');
+
+// 5. Delete with the command line: record first, then the file.
+m = trace.length;
+await run('delete FLOPPY.ZDL -y');
+t = since(m);
+say(!fs.has('FLOPPY.ZDL') && t.indexOf(`put:${LIST}`) < t.indexOf('del:FLOPPY.ZDL'), `record removed, then the file: ${t}`);
+say(listNames() === '>>>0 <<<0 >>>7 SONGBOX.ZDL DRUMBX2.ZDL <<<7 >>>8 DELAY.ZDL <<<8', `list after delete: ${listNames()}`);
+
+// 6. The list itself can still be deleted (command line).
+await run(`delete ${LIST} -y`);
+say(!fs.has(LIST), 'delete FLST_SEQ.ZDT works on a G1on');
+
+// 7. No list: nothing edited.
+m = trace.length;
+await drop(['Floppy.ZDL', floppy]);
+say(!fs.has(LIST) && listPuts(m) === 0 && /No FLST_SEQ\.ZDT on the pedal/.test(logText()), 'no list: none written, the log says so');
+
+// 8. No list, and the pedal writes its own with the upload: that one already lists the effect.
+await run('delete FLOPPY.ZDL -y');
+pedalMode.writesOwnList = true;
+m = trace.length;
+await drop(['Floppy.ZDL', floppy]);
+say(fs.has(LIST) && listNames().includes('FLOPPY.ZDL') && listPuts(m) === 0, `pedal's own list kept: ${listNames()}`);
+pedalMode.writesOwnList = false;
+
+// 9. A pedal that writes its own list over ours: read-back fails twice, the old list is downloaded, nothing deleted.
+fs.set(LIST, makeList([[0, []], [7, ['SONGBOX.ZDL']], [8, ['DELAY.ZDL']]]));
+await run('delete FLOPPY.ZDL -y');
+pedalMode.overwritesList = true;
+await drop(['Floppy.ZDL', floppy]);
+say(fs.has(LIST) && downloads.includes(`pedal-${LIST}`) && /WRITING THE OLD FLST_SEQ\.ZDT BACK FAILED/.test(logText()),
+  `failed list write: old one downloaded, list kept (${downloads.join(', ')})`);
+
+out.push(fails ? `${fails} FAILED` : 'ALL PASSED');
+document.body.dataset.result = out.join('\n');
+document.title = fails ? 'FAIL' : 'PASS';
+</script>
+</body>
+</html>
