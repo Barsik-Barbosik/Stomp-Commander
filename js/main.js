@@ -9,7 +9,7 @@ import { ZoomMS, effectListAdd, effectListRemove } from './zoomms.js';
 import { KeepAlive, INTERVAL } from './keepalive.js';
 import { runCommand, suggest } from './cli.js';
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.0.1';
 const DRAG_TYPE = 'application/x-stomp-commander';
 
 const $ = id => document.getElementById(id);
@@ -781,9 +781,13 @@ addEventListener('keydown', async ev => {
   location.reload();
 }, true);
 
-// Reload or close during a pedal operation: Chrome asks first.
+// Reload or close while connected: Chrome asks first ("Leave site?"; its text can't be changed),
+// because leaving with the port open can hang Chrome's MIDI service until every Chrome process ends.
 addEventListener('beforeunload', ev => {
-  if (busyOps > 0 && midi.isOpen) ev.preventDefault();
+  if (!midi.isOpen) return;
+  ev.preventDefault();
+  ev.returnValue = '';
+  log('Press "Disconnect" before you reload or close this page: an open MIDI port can hang Chrome.', 'warn');
 });
 
 async function refreshPedal() {

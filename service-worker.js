@@ -3,7 +3,7 @@
 // slow or missing connection; a new version shows on the load after it was fetched.
 // Bump CACHE with every release so old files are dropped.
 
-const CACHE = 'stomp-commander-v1.0.0';
+const CACHE = 'stomp-commander-v1.0.1';
 const FILES = [
   './', 'index.html', 'app.css', 'manifest.webmanifest', 'icon.svg',
   'js/main.js', 'js/midi.js', 'js/zoomg1.js', 'js/zoomms.js', 'js/zdl.js', 'js/pcfs.js', 'js/idb.js', 'js/keepalive.js', 'js/cli.js',

@@ -10,17 +10,24 @@ Plain HTML + JavaScript modules, no build step.
 
 ## Run
 
-Chrome or Edge (Web MIDI with SysEx and folder access are Chromium-only). Close
-Zoom Effect Manager and other MIDI programs first: Windows lets only one
-program use the pedal's MIDI port.
+Open **https://barsik-barbosik.github.io/Stomp-Commander/** in Chrome or Edge
+(Web MIDI with SysEx and folder access are Chromium-only). Nothing to install;
+after the first visit it also opens offline, and Chrome can install it as an
+app. Close Zoom Effect Manager and other MIDI programs first: Windows lets only
+one program use the pedal's MIDI port. Chrome asks once for MIDI device access
+and once per visit for the folder.
+
+**Press Disconnect before you reload the page or close the browser.** Otherwise
+Chrome can keep the pedal's MIDI port busy and hang, and only ending all Chrome
+processes (Task Manager) frees it.
+
+To run your own copy, serve the folder and open http://localhost:8000/ (a page
+opened as `file://` can't use MIDI):
 
 ```
 cd Stomp-Commander
 python -m http.server 8000
 ```
-
-Open http://localhost:8000/ (a page opened as `file://` can't use MIDI). Chrome
-asks once for MIDI device access and once per visit for the folder.
 
 ## Features
 
