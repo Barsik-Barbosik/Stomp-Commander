@@ -2,11 +2,15 @@
 
 <img src="icon.svg" width="64" height="64" alt="Stomp Commander icon: a pedal with a screen, three knobs and a footswitch">
 
-A browser app with two panels: a folder on the PC (left) and the files on a Zoom
-G1on-family pedal (G1on, G1Xon, B1on, B1Xon) or a MultiStomp (MS-70CDR,
-MS-50G, MS-60B) (right). Copy ZDL effects to the pedal, delete them, see each
-effect's screen picture, knobs and ids.
-Plain HTML + JavaScript modules, no build step.
+A browser app with two panels: a folder on the PC on the left, the files on a
+Zoom pedal on the right. Copy ZDL effects to the pedal, delete them, and see
+each effect's screen picture, knobs and ids. Plain HTML + JavaScript modules,
+no build step.
+
+Supported pedals:
+
+- G1on family: G1on, G1Xon, B1on, B1Xon
+- MultiStomp: MS-70CDR, MS-50G, MS-60B
 
 ## Run
 
