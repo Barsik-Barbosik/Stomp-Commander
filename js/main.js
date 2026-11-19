@@ -4,12 +4,12 @@ import * as pcfs from './pcfs.js';
 import * as idb from './idb.js';
 import { parseZdl, drawPicture, groupName } from './zdl.js';
 import { Midi, hex } from './midi.js';
-import { ZoomG1, DEVICES, BLOCK, LIST_FILE, parseEffectList } from './zoomg1.js';
+import { ZoomG1, DEVICES, BLOCK, LIST_FILE, parseEffectList, GLOBAL_FIELDS, describePatch, unpack7 } from './zoomg1.js';
 import { ZoomMS, effectListAdd, effectListRemove } from './zoomms.js';
 import { KeepAlive, INTERVAL } from './keepalive.js';
 import { runCommand, suggest } from './cli.js';
 
-export const VERSION = '1.0.1';
+export const VERSION = '1.0.2';
 const DRAG_TYPE = 'application/x-stomp-commander';
 
 const $ = id => document.getElementById(id);
@@ -1243,7 +1243,10 @@ const api = {
     const rows = await op('Reading the current patch…', z => z.patch());
     if (rows === undefined) return;
     if (!rows.length) { log('FAIL no patch reply', 'err'); return; }
-    for (const r of rows) log(`${String(r.length + 2).padStart(5)} B  F0 ${hex(r, r.length)} F7`);
+    for (const r of rows) {
+      log(`${String(r.length + 2).padStart(5)} B  F0 ${hex(r, r.length)} F7`);
+      for (const line of describePatch(unpack7(r.slice(4)).slice(0, 112))) log('   ' + line);
+    }
     if (!name) return;
     try {
       await pcfs.write(pcDir(), name, Uint8Array.from(rows.flatMap(r => [0xF0, ...r, 0xF7])));
@@ -1262,6 +1265,35 @@ const api = {
     if (!g1Only('program')) return;
     if (await op('Switching patch…', z => z.program(n).then(() => true)))
       log(`OK program change ${n} (sent; unsaved edits of the old patch are lost)`, 'ok');
+  },
+  // Pedal state, read-only, as tools/g1on_sysex.py current / settings / patchinfo / status.
+  current: async () => {
+    if (!g1Only('current')) return;
+    const n = await op('Reading the patch number…', z => z.currentPatch());
+    if (n === undefined) return;
+    if (n === null) log('FAIL no Program Change reply', 'err');
+    else log(`OK current patch ${n}`, 'ok');
+  },
+  settings: async () => {
+    if (!g1Only('settings')) return;
+    const values = await op('Reading the global settings…', z => z.globalSettings());
+    if (values === undefined) return;
+    if (values === null) { log('FAIL no 2A reply', 'err'); return; }
+    GLOBAL_FIELDS.forEach(([, name, show], i) => log(`   ${name.padEnd(18)} ${show(values[i])}`));
+  },
+  patchinfo: async () => {
+    if (!g1Only('patchinfo')) return;
+    const f = await op('Reading the patch format…', z => z.patchFormat());
+    if (f === undefined) return;
+    if (f === null) log('FAIL no 06 reply', 'err');
+    else log(`OK ${f[0]} patches x ${f[1]} bytes`, 'ok');
+  },
+  status: async () => {
+    if (!g1Only('status')) return;
+    const v = await op('Reading the status…', z => z.status());
+    if (v === undefined) return;
+    if (v === null) log('FAIL no 17 reply', 'err');
+    else log(`OK status ${v} (0x${v.toString(16)})`, 'ok');
   },
   verbose: on => { showSysex = on; log(`SysEx in log: ${on ? 'on' : 'off'}`); },
   clearLog: () => { $('log').replaceChildren(); },

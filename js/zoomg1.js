@@ -332,4 +332,98 @@ export class ZoomG1 {
     if (!(n >= 0 && n <= 99)) throw new Error('program: patch 0..99');
     await this.midi.sendShort([0xC0, n]);
   }
+
+  // --- pedal state, read-only (editor mode 50 where needed, no PC mode)
+
+  // Current patch number: 33 is answered with Bank Select (CC 0 = n / 100, CC 32 = 0) and a
+  // Program Change (n % 100), plain MIDI, editor mode only. null without an answer.
+  async currentPatch() {
+    await this.cmd([0x50]);
+    const others = [];
+    await this.midi.xfer([ZOOM, 0x00, this.dev, 0x33], { others });
+    const bank = others.find(m => (m[0] & 0xF0) === 0xB0 && m[1] === 0)?.[2] ?? 0;
+    const pc = others.filter(m => (m[0] & 0xF0) === 0xC0);
+    return pc.length ? bank * 100 + pc[pc.length - 1][1] : null;
+  }
+
+  // Global settings: 2B is answered with 2A + 16 packed bytes (editor mode only). Raw field values or null.
+  async globalSettings() {
+    await this.cmd([0x50]);
+    const r = (await this.cmd([0x2B])).find(r => r.length > 5 && r[3] === 0x2A);
+    return r ? unpackGlobals(unpack7(r.slice(4)).slice(0, 16)) : null;
+  }
+
+  // [number of patches, bytes per patch]: 07 is answered with 06 + two 14-bit values.
+  async patchFormat() {
+    const r = (await this.cmd([0x07])).find(r => r.length >= 8 && r[3] === 0x06);
+    return r ? [r[4] | r[5] << 7, r[6] | r[7] << 7] : null;
+  }
+
+  // 16 is answered with 17 + a 35-bit value (editor mode only). Seen: 5; the OS adds 0x2000
+  // in PC mode. Meaning otherwise unknown.
+  async status() {
+    await this.cmd([0x50]);
+    const r = (await this.cmd([0x16])).find(r => r.length >= 9 && r[3] === 0x17);
+    return r ? fromU35(r.slice(4, 9)) : null;
+  }
+}
+
+// Global settings in the 2A reply: 18 fields, packed from bit 0 of the 16 bytes, low bits first
+// (width, name, how to show the raw value). Checked on a B1Xon 1.30.
+const onOff = v => (v ? 'on' : 'off');
+export const GLOBAL_FIELDS = [
+  [1, 'unknown 0', String],
+  [1, 'auto save', onOff],
+  [1, 'battery', v => (v ? 'Ni-MH' : 'alkaline')],
+  [2, 'LCD backlight', v => ({ 0: 'off', 1: 'on' }[v] ?? String(v))],
+  [4, 'LCD contrast', String],
+  [1, 'ECO', onOff],
+  [1, 'preselect', onOff],
+  [1, 'tuner output', v => (v ? 'mute' : 'bypass')],
+  [4, 'tuner calibration', v => `${435 + v} Hz`],
+  [4, 'tuner type', v => ({ 0: 'chromatic', 1: 'bass' }[v] ?? String(v))],
+  [4, 'tuner flat', String],
+  [7, 'rhythm pattern', v => String(v + 1)],
+  [7, 'rhythm level', String],
+  [7, 'looper time', v => `setting ${v}`],
+  [7, 'looper level', String],
+  [8, 'tempo', v => `${v} BPM`],
+  [7, 'master level', String],
+  [32, 'unknown 17', String],
+];
+
+// Bit field of a little-endian byte array (BigInt, so any width works).
+function bits(bytes, pos, width) {
+  let v = 0n;
+  for (let i = bytes.length - 1; i >= 0; i--) v = (v << 8n) | BigInt(bytes[i]);
+  return Number((v >> BigInt(pos)) & ((1n << BigInt(width)) - 1n));
+}
+
+export function unpackGlobals(u) {
+  let pos = 0;
+  return GLOBAL_FIELDS.map(([width]) => { const v = bits(u, pos, width); pos += width; return v; });
+}
+
+// Expression pedal destination byte: low nibble = target, high nibble = parameter.
+function pedalTarget(dst) {
+  const target = dst & 0x0F, param = dst >> 4;
+  if (target === 2) return 'input volume';
+  if (target === 8) return 'output volume';
+  if (target >= 3 && target <= 7) return `slot ${target - 3} ` + (param >= 2 ? `knob ${param - 1}` : 'none');
+  return `raw 0x${dst.toString(16).padStart(2, '0')}`;
+}
+
+// Lines describing a 112-byte patch (the 29 / 08 payload, unpacked): 5 slots x 18 bytes
+// (bit 0 = on, bits 1..29 = effect id = gid << 24 | fxid), byte 90 bits 5..7 = slots used,
+// bit offsets 728 level, 735 pedal destination, 743 / 771 pedal range min / max, bytes 101..110 name.
+export function describePatch(u) {
+  const name = String.fromCharCode(...u.slice(101, 111).map(b => (b >= 0x20 && b < 0x7F ? b : 0x20)));
+  const lines = [`name '${name}', level ${bits(u, 728, 7)}, slots used ${u[90] >> 5}`];
+  for (let s = 0; s < 5; s++) {
+    const row = u.slice(s * 18, s * 18 + 18);
+    const fx = bits(row, 1, 29);
+    if (fx) lines.push(`slot ${s}: gid ${Math.floor(fx / 2 ** 24)} fxid ${fx % 2 ** 24}, ${row[0] & 1 ? 'on' : 'off'}`);
+  }
+  lines.push(`pedal: ${pedalTarget(bits(u, 735, 8))}, range ${bits(u, 743, 13)}..${bits(u, 771, 13)}`);
+  return lines;
 }

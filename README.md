@@ -130,8 +130,11 @@ python -m http.server 8000
   `put`, `get`, `delete`, `pcdelete`, `ping`, `keepalive`, `sysex`, `log save`, ...);
   G1on family also `patch [NAME.syx]` (current patch rows; editor mode, no PC
   mode, so unsaved edits stay; optionally saved to the PC folder), `knob SLOT
-  PARAM VALUE` (set live, not saved) and `program N` (Program Change; unsaved
-  edits are lost);
+  PARAM VALUE` (set live, not saved), `program N` (Program Change; unsaved
+  edits are lost), `current` (current patch number), `settings` (tempo, tuner,
+  rhythm, looper and other global settings, read-only), `patchinfo` (patch count
+  and size) and `status`; `patch` also shows the name, level, effects and
+  expression pedal settings;
   suggestions for commands and file names appear while typing (Tab or click
   takes one, Up / Down choose, Esc hides);
   `*` / `?` work in names, `-y` skips confirmations; several lines run in order.

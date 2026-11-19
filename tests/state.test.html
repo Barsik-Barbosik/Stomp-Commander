@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stomp Commander pedal state test</title>
+</head>
+<body>
+<script type="module">
+// Pedal state requests of ZoomG1 (current, globals, format, status) and describePatch, against a
+// fake MIDI port that answers with replies recorded from a B1Xon 1.30. The expected lines are the
+// output of Custom-Zoom-ZDL-Effects' tools/g1on_sysex.py for the same bytes.
+// Serve this folder and open http://localhost:8000/tests/state.test.html
+import { ZoomG1, GLOBAL_FIELDS, describePatch, unpack7 } from '../js/zoomg1.js';
+
+const DUMP = [82, 0, 102, 40, 8, 19, 4, 0, 14, 0, 0, 0, 2, 0, 32, 32, 1, 0, 64, 1, 1, 0, 0, 0, 0, 33, 0, 64, 1, 2, 3, 80, 0, 10, 0, 74, 0, 35, 40, 2, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 50, 4, 0, 0, 0, 32, 3, 0, 0, 0, 0, 85, 75, 32, 71, 0, 114, 111, 111, 118, 101, 32, 0];
+const GLOB = [82, 0, 102, 42, 3, 8, 83, 0, 0, 40, 0, 124, 0, 70, 6, 0, 0, 0, 0, 0, 0, 0, 0];
+const WANT_GLOBALS = ["unknown 0 0", "auto save off", "battery alkaline", "LCD backlight on", "LCD contrast 8", "ECO on", "preselect off", "tuner output bypass", "tuner calibration 440 Hz", "tuner type chromatic", "tuner flat 0", "rhythm pattern 1", "rhythm level 80", "looper time setting 0", "looper level 100", "tempo 111 BPM", "master level 100", "unknown 17 0"];
+const WANT_PATCH = ["name 'UK Groove ', level 50, slots used 2", "slot 0: gid 7 fxid 521, on", "slot 1: gid 1 fxid 6291472, on", "pedal: output volume, range 0..100"];
+
+const sent = [];
+const midi = {
+  async xfer(body, { others = null } = {}) {
+    sent.push(body.map(b => b.toString(16).padStart(2, '0')).join(' '));
+    switch (body[3]) {
+      case 0x33: others?.push([0xB0, 0x00, 0x00], [0xB0, 0x20, 0x00], [0xC0, 0x07]); return [];
+      case 0x2B: return [GLOB];
+      case 0x07: return [[0x52, 0x00, 0x66, 0x06, 0x64, 0x00, 0x70, 0x00]];
+      case 0x16: return [[0x52, 0x00, 0x66, 0x17, 0x05, 0x40, 0x00, 0x00, 0x00]];
+      default: return [];
+    }
+  },
+};
+const z = new ZoomG1(midi);
+z.dev = 0x66;
+
+const fails = [];
+const check = (what, got, want) => {
+  if (JSON.stringify(got) !== JSON.stringify(want)) fails.push(`${what}: ${JSON.stringify(got)} != ${JSON.stringify(want)}`);
+};
+check('current', await z.currentPatch(), 7);
+const g = await z.globalSettings();
+check('globals', GLOBAL_FIELDS.map(([, name, show], i) => `${name} ${show(g[i])}`), WANT_GLOBALS);
+check('format', await z.patchFormat(), [100, 112]);
+check('status', await z.status(), 5 + (0x40 << 7));
+check('patch', describePatch(unpack7(DUMP.slice(4)).slice(0, 112)), WANT_PATCH);
+check('sent', sent, ['52 00 66 50', '52 00 66 33', '52 00 66 50', '52 00 66 2b', '52 00 66 07', '52 00 66 50', '52 00 66 16']);
+document.body.dataset.result = fails.length ? 'FAIL ' + fails.join(' | ') : 'PASS';
+document.body.textContent = document.body.dataset.result;
+</script>
+</body>
+</html>

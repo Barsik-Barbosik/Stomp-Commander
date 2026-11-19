@@ -15,6 +15,7 @@ export class Midi {
     this.input = null;
     this.output = null;
     this.collector = null;
+    this.shortCollector = null;
     this.queue = Promise.resolve();
     this.lastActivity = 0;
     this.onstate = () => {};
@@ -77,7 +78,10 @@ export class Midi {
   }
 
   _message(d) {
-    if (d[0] !== 0xF0) return;
+    if (d[0] !== 0xF0) {
+      if (this.shortCollector) this.shortCollector(Array.from(d));
+      return;
+    }
     const body = Array.from(d.subarray(1, d[d.length - 1] === 0xF7 ? d.length - 1 : d.length));
     if (this.collector) this.collector(body);
     else this.log('<< (stray) ' + hex(body), 'sysex');
@@ -97,7 +101,8 @@ export class Midi {
   }
 
   // Send one SysEx; resolve with all replies (stops `quiet` ms after the last one, at most `timeout` ms).
-  xfer(body, { timeout = 1000, quiet = 50 } = {}) {
+  // Other replies (e.g. Program Change) go to the `others` array when it is given.
+  xfer(body, { timeout = 1000, quiet = 50, others = null } = {}) {
     const run = () => new Promise((resolve, reject) => {
       if (!this.isOpen) { reject(new Error('MIDI port not open')); return; }
       const replies = [];
@@ -105,21 +110,33 @@ export class Midi {
       let timer;
       const finish = () => {
         this.collector = null;
+        this.shortCollector = null;
         this.lastActivity = performance.now();
-        if (!replies.length) this.log('   (no reply)', 'sysex');
+        if (!replies.length && !others?.length) this.log('   (no reply)', 'sysex');
         resolve(replies);
+      };
+      const got = () => {
+        clearTimeout(timer);
+        timer = setTimeout(finish, Math.max(0, Math.min(deadline, performance.now() + quiet) - performance.now()));
       };
       this.collector = r => {
         this.log('<< ' + hex(r), 'sysex');
         replies.push(r);
-        clearTimeout(timer);
-        timer = setTimeout(finish, Math.max(0, Math.min(deadline, performance.now() + quiet) - performance.now()));
+        got();
       };
+      if (others) {
+        this.shortCollector = m => {
+          this.log('<< ' + hex(m), 'sysex');
+          others.push(m);
+          got();
+        };
+      }
       this.log('>> ' + hex(body), 'sysex');
       try {
         this.output.send([0xF0, ...body, 0xF7]);
       } catch (e) {
         this.collector = null;
+        this.shortCollector = null;
         reject(e);
         return;
       }

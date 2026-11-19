@@ -24,6 +24,10 @@ const COMMANDS = [
   { name: 'patch', usage: 'patch [NAME.syx]', text: 'current patch rows (G1on family; keeps unsaved edits), optionally saved to the PC folder' },
   { name: 'knob', usage: 'knob SLOT PARAM VALUE', text: 'set a knob live, not saved (G1on; slot 0..4, param 0 on/off, 2..10 knobs 1..9)' },
   { name: 'program', usage: 'program N', text: 'switch to patch N 0..99 (G1on; unsaved edits are lost)' },
+  { name: 'current', usage: 'current', text: 'number of the current patch (G1on)' },
+  { name: 'settings', usage: 'settings', text: 'global settings: tempo, tuner, rhythm, looper, ... (G1on)' },
+  { name: 'patchinfo', usage: 'patchinfo', text: 'number of patches and patch size (G1on)' },
+  { name: 'status', usage: 'status', text: 'status value (G1on; meaning unknown)' },
   { name: 'sysex', usage: 'sysex on|off', text: 'show SysEx traffic in the log', args: ['on', 'off'], one: true },
   { name: 'log', usage: 'log clear|save', text: 'clear the log / save the whole log as a text file', args: ['clear', 'save'], one: true },
 ];
@@ -157,6 +161,18 @@ export async function runCommand(line, api) {
     case 'program':
       if (args.length !== 1 || !Number.isInteger(Number(args[0]))) { log('program N (0..99)', 'warn'); break; }
       await api.program(Number(args[0]));
+      break;
+    case 'current':
+      await api.current();
+      break;
+    case 'settings':
+      await api.settings();
+      break;
+    case 'patchinfo':
+      await api.patchinfo();
+      break;
+    case 'status':
+      await api.status();
       break;
     case 'sysex':
       api.verbose(args[0] !== 'off');
